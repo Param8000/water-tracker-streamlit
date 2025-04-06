@@ -5,17 +5,28 @@ import streamlit as st
 st.set_page_config(layout="wide")  # ✅ FIRST command
 
 
-# 📦 Cached DB connection
-
-@st.cache_resource
+# 📦 Get DB connection with retries
 def get_connection():
-    return mysql.connector.connect(
-        host="db4free.net",
-        user="param8000",
-        password="12345678",
-        database="tenantdb",
-        port=3306
-    )
+    retries = 3
+    for attempt in range(retries):
+        try:
+            conn = mysql.connector.connect(
+                host="db4free.net",
+                user="param8000",
+                password="12345678",
+                database="tenantdb",
+                port=3306
+            )
+            return conn
+        except mysql.connector.errors.OperationalError as e:
+            if attempt == retries - 1:
+                st.error(
+                    "❌ Unable to connect to the database after multiple attempts.")
+                st.stop()
+            else:
+                st.warning(
+                    f"⚠️ Connection failed. Retrying... (Attempt {attempt + 1})")
+                continue
 
 
 def get_cursor():
@@ -28,11 +39,7 @@ def get_cursor():
     return conn, conn.cursor(dictionary=True)
 
 
-conn, cur = get_cursor()
-
 # 📦 Cached active tenants
-
-
 @st.cache_data(ttl=300)
 def get_active_tenants():
     conn, cur = get_cursor()
