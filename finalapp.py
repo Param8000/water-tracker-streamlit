@@ -1,51 +1,80 @@
-import streamlit as st
-import mysql.connector
+from datetime import datetime, date
 from decimal import Decimal
-from datetime import datetime
+import mysql.connector
+import streamlit as st
+st.set_page_config(layout="wide")  # ✅ FIRST command
 
-# DB connection
-conn = mysql.connector.connect(
-    host="db4free.net",
-    user="param8000",
-    password="12345678",
-    database="tenantdb",
-    port=3306
-)
 
-cur = conn.cursor(dictionary=True)
+# 📦 Cached DB connection
 
-st.set_page_config(layout="wide")
+@st.cache_resource
+def get_connection():
+    return mysql.connector.connect(
+        host="db4free.net",
+        user="param8000",
+        password="12345678",
+        database="tenantdb",
+        port=3306
+    )
 
-st.title("🚰 Water Usage Entry System")
+
+def get_cursor():
+    conn = get_connection()
+    try:
+        conn.ping(reconnect=True, attempts=3, delay=2)
+    except mysql.connector.errors.OperationalError:
+        st.error("❌ Lost connection to the database. Please restart the app.")
+        st.stop()
+    return conn, conn.cursor(dictionary=True)
+
+
+conn, cur = get_cursor()
+
+# 📦 Cached active tenants
+
+
+@st.cache_data(ttl=300)
+def get_active_tenants():
+    conn, cur = get_cursor()
+    cur.execute("SELECT Name FROM Tenants WHERE Status = 'Active'")
+    return [row["Name"] for row in cur.fetchall()]
+
+
+st.title("😀 Water Usage Entry System")
 
 # 👤 Tenant dropdown
-cur.execute("SELECT Name FROM Tenants WHERE Status = 'Active'")
-tenant_names = [row["Name"] for row in cur.fetchall()]
+tenant_names = get_active_tenants()
 name = st.selectbox("👤 Select Tenant", tenant_names)
 
-# 📅 Date selector
+# 🗕️ Date selector
+try:
+    today = date.today()
+except Exception as e:
+    st.error("❌ Unable to access system date. Please check your system clock.")
+    st.stop()
+
 selected_date = st.date_input(
-    "📅 Select a date in the desired month", value=datetime.today())
+    "🗕️ Select a date in the desired month", value=today)
 month = selected_date.strftime('%b-%y')
 st.markdown(f"### 🗓️ Recording for: **{month}**")
 
-# Get most recent record for this tenant
+# Get max recorded reading ever for this tenant
+conn, cur = get_cursor()
 cur.execute("""
-    SELECT Month, Hot_Water_Reading, Cold_Water_Reading
+    SELECT MAX(Hot_Water_Reading) AS Max_Hot, MAX(Cold_Water_Reading) AS Max_Cold
     FROM WaterUsageLog
     WHERE Name = %s
-    ORDER BY STR_TO_DATE(Month, '%%b-%%y') DESC
-    LIMIT 1
 """, (name,))
-latest = cur.fetchone()
+max_record = cur.fetchone()
 
-if latest:
-    latest_hot = Decimal(str(latest["Hot_Water_Reading"]))
-    latest_cold = Decimal(str(latest["Cold_Water_Reading"]))
-    latest_month = latest["Month"]
+if max_record["Max_Hot"] is not None and max_record["Max_Cold"] is not None:
+    latest_hot = Decimal(str(max_record["Max_Hot"]))
+    latest_cold = Decimal(str(max_record["Max_Cold"]))
     st.info(
-        f"📘 Latest Recorded Reading ({latest_month}): 🔥 {latest_hot} L, ❄️ {latest_cold} L")
+        f"📘 Highest Recorded Reading: 🔥 {latest_hot} L, ❄️ {latest_cold} L")
 else:
+    # No records found, use initial reading
+    conn, cur = get_cursor()
     cur.execute("""
         SELECT Initial_Hot_Water_Reading, Initial_Cold_Water_Reading
         FROM Tenants WHERE Name = %s
@@ -57,7 +86,7 @@ else:
     latest_hot = Decimal(str(initial["Initial_Hot_Water_Reading"]))
     latest_cold = Decimal(str(initial["Initial_Cold_Water_Reading"]))
     st.info(
-        f"🆕 No logs found. Using initial readings: 🔥 {latest_hot} L, ❄️ {latest_cold} L")
+        f"🆑 No logs found. Using initial readings: 🔥 {latest_hot} L, ❄️ {latest_cold} L")
 
 # Layout columns for better distribution
 col1, col2 = st.columns(2)
@@ -67,16 +96,16 @@ with col1:
     st.markdown("---")
     if st.checkbox("📂 Show Previous Records"):
         st.subheader("📊 Previous Records")
+        conn, cur = get_cursor()
         cur.execute("""
             SELECT Month, Hot_Water_Reading, Cold_Water_Reading
             FROM WaterUsageLog
             WHERE Name = %s
-            ORDER BY STR_TO_DATE(Month, '%%b-%%y')
-            LIMIT 3
+            ORDER BY STR_TO_DATE(CONCAT('01-', Month), '%d-%b-%y') DESC
         """, (name,))
         rows = cur.fetchall()
         if rows:
-            for row in rows:
+            for row in reversed(rows):
                 st.write(
                     f"🗓️ {row['Month']} - 🔥 {row['Hot_Water_Reading']} L, ❄️ {row['Cold_Water_Reading']} L")
         else:
@@ -86,30 +115,42 @@ with col1:
 with col2:
     st.markdown("---")
     if st.checkbox("📋 Show Full WaterUsageLog Table"):
+        conn, cur = get_cursor()
         cur.execute(
-            "SELECT * FROM WaterUsageLog ORDER BY STR_TO_DATE(Month, '%%b-%%y')")
+            "SELECT * FROM WaterUsageLog ORDER BY STR_TO_DATE(CONCAT('01-', Month), '%d-%b-%y')")
         full_table = cur.fetchall()
         if full_table:
             st.dataframe(full_table)
         else:
             st.write("⚠️ No records found in WaterUsageLog.")
 
-# 🧾 Current readings
+# 🧾 Current readings (must always increase)
 st.markdown("---")
 col3, col4 = st.columns(2)
 with col3:
     current_hot = st.number_input(
-        "🔥 Current Hot Water Reading (L)", min_value=int(latest_hot), value=int(latest_hot), step=1)
+        "🔥 Current Hot Water Reading (L)",
+        min_value=int(latest_hot),
+        value=int(latest_hot),
+        step=1,
+        help="Cannot be less than the previous reading"
+    )
 with col4:
     current_cold = st.number_input(
-        "❄️ Current Cold Water Reading (L)", min_value=int(latest_cold), value=int(latest_cold), step=1)
+        "❄️ Current Cold Water Reading (L)",
+        min_value=int(latest_cold),
+        value=int(latest_cold),
+        step=1,
+        help="Cannot be less than the previous reading"
+    )
 
-# 🧮 Calculate usage
+# 🧺 Calculate usage
 hot_usage = Decimal(current_hot) - latest_hot
 cold_usage = Decimal(current_cold) - latest_cold
 total_usage = hot_usage + cold_usage
 
 # 📦 Get tenant info
+conn, cur = get_cursor()
 cur.execute(
     "SELECT Rent, House, `Water_Paise_per_Litre` FROM Tenants WHERE Name = %s", (name,))
 tenant = cur.fetchone()
@@ -119,7 +160,11 @@ if not tenant:
 
 rent = Decimal(str(tenant["Rent"]))
 house = tenant["House"]
-water_rate = Decimal(str(tenant["Water_Paise_per_Litre"]))  # paise per litre
+water_rate = Decimal(str(tenant["Water_Paise_per_Litre"]))
+
+# 💡 Show tenant info
+st.info(
+    f"📄 Water Rate: {water_rate} paise per litre, Water Usage: {total_usage} L")
 
 # 💸 Calculate cost
 water_cost_paise = total_usage * water_rate
@@ -131,6 +176,7 @@ st.success(
 
 # 💾 Submit to DB
 if st.button("💾 Submit"):
+    conn, cur = get_cursor()
     cur.execute(
         "SELECT * FROM WaterUsageLog WHERE Name = %s AND Month = %s", (name, month))
     if cur.fetchone():
