@@ -11,6 +11,7 @@ conn = mysql.connector.connect(
     database="tenantdb",
     port=3306
 )
+
 cur = conn.cursor(dictionary=True)
 
 st.set_page_config(layout="wide")
@@ -110,7 +111,7 @@ total_usage = hot_usage + cold_usage
 
 # 📦 Get tenant info
 cur.execute(
-    "SELECT Rent, House, `Water Paise per Litre` FROM Tenants WHERE Name = %s", (name,))
+    "SELECT Rent, House, `Water_Paise_per_Litre` FROM Tenants WHERE Name = %s", (name,))
 tenant = cur.fetchone()
 if not tenant:
     st.error("❌ Tenant not found in database.")
@@ -118,7 +119,7 @@ if not tenant:
 
 rent = Decimal(str(tenant["Rent"]))
 house = tenant["House"]
-water_rate = Decimal(str(tenant["Water Paise per Litre"]))  # paise per litre
+water_rate = Decimal(str(tenant["Water_Paise_per_Litre"]))  # paise per litre
 
 # 💸 Calculate cost
 water_cost_paise = total_usage * water_rate
